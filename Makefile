@@ -52,6 +52,14 @@ e2e: serve
 # Starts the container (host networking on Linux by default so Ollama is reachable),
 # waits for readiness, then runs only the external test(s) whose name includes 'External'.
 e2e-test:
+	@E2E_OLLAMA_URL=$${SLM_OLLAMA_URL:-$(DEFAULT_OLLAMA_URL)}; \
+	CLEAN_URL=$${E2E_OLLAMA_URL%/}; \
+	echo "Checking Ollama availability at $$CLEAN_URL ..."; \
+	if ! curl -sSf "$${CLEAN_URL}/api/version" >/dev/null 2>&1; then \
+		echo "Ollama is not reachable at $$CLEAN_URL. Ensure 'ollama serve' is running and listening on that address/port."; \
+		echo "You may also override SLM_OLLAMA_URL before running 'make e2e-test'."; \
+		exit 1; \
+	fi
 	@echo "Starting slmcache container for external e2e (Ollama required)..."
 	SLM_REQUIRE_OLLAMA=1 DOCKER_NETWORK_MODE=$${DOCKER_NETWORK_MODE:-$(DEFAULT_NETWORK_MODE)} SLM_OLLAMA_URL=$${SLM_OLLAMA_URL:-$(DEFAULT_OLLAMA_URL)} docker compose up --build -d
 	$(MAKE) wait-ready

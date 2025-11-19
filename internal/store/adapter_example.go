@@ -51,3 +51,18 @@ func (e *ExternalVectorDB) DeleteEntry(ctx context.Context, id int64) error {
 	// TODO: implement delete in external backend
 	return errors.New("not implemented: DeleteEntry")
 }
+
+func (e *ExternalVectorDB) UpdateEntryMetadata(ctx context.Context, id int64, metadata map[string]interface{}, replace bool) error {
+	// TODO: implement metadata update semantics in backend
+	return errors.New("not implemented: UpdateEntryMetadata")
+}
+
+func (e *ExternalVectorDB) DeleteEntryMetadata(ctx context.Context, id int64, keys ...string) error {
+	// TODO: implement metadata key removal
+	return errors.New("not implemented: DeleteEntryMetadata")
+}
+
+func (e *ExternalVectorDB) FindEntriesByMetadata(ctx context.Context, filters map[string]string) ([]*models.Entry, error) {
+	// TODO: run metadata-only query in backend store
+	return nil, errors.New("not implemented: FindEntriesByMetadata")
+}

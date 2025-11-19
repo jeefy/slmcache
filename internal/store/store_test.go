@@ -37,3 +37,35 @@ func TestCreateAndSearch(t *testing.T) {
 		t.Fatalf("expected positive similarity score")
 	}
 }
+
+func TestMetadataOperations(t *testing.T) {
+	st, err := store.New()
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	ctx := context.Background()
+	id, err := st.CreateEntryWithVector(ctx, &models.Entry{Prompt: "Doc", Response: "Answer"}, []float64{0.5, 0.5})
+	if err != nil {
+		t.Fatalf("create entry: %v", err)
+	}
+	if err := st.UpdateEntryMetadata(ctx, id, map[string]interface{}{"source": "faq", "lang": "en"}, false); err != nil {
+		t.Fatalf("update metadata: %v", err)
+	}
+	entries, err := st.FindEntriesByMetadata(ctx, map[string]string{"source": "faq"})
+	if err != nil {
+		t.Fatalf("find metadata: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != id {
+		t.Fatalf("expected entry returned from metadata query")
+	}
+	if err := st.DeleteEntryMetadata(ctx, id, "source"); err != nil {
+		t.Fatalf("delete metadata: %v", err)
+	}
+	entries, err = st.FindEntriesByMetadata(ctx, map[string]string{"source": "faq"})
+	if err != nil {
+		t.Fatalf("find metadata after delete: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries after metadata removal")
+	}
+}

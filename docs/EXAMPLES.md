@@ -102,3 +102,25 @@ func main() {
 Run the example with a locally running slmcache service (see `README.md` for
 startup instructions). The first prompt populates the cache, and the second
 prompt reuses the cached answer immediately instead of hitting the mock LLM.
+
+## Metadata-driven lookups
+
+Attach routing hints or provenance data when you store entries and query them later:
+
+```bash
+# Merge metadata into an existing entry
+curl -X PATCH \
+    -H "Content-Type: application/json" \
+    localhost:8080/entries/42/metadata \
+    -d '{"metadata":{"intent":"faq","locale":"en-US"}}'
+
+# List only entries tagged as FAQ for English
+curl "localhost:8080/entries?metadata.intent=faq&metadata.locale=en-US"
+
+# Apply the same filters to semantic search results
+curl "localhost:8080/search?q=refunds&metadata.intent=faq"
+```
+
+Filters use string comparison across all metadata keys, which makes it easy to
+tag responses with arbitrary values (model name, temperature, compliance flags,
+etc.) and fetch only the subsets you care about before reusing cached answers.

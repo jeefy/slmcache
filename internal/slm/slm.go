@@ -25,6 +25,8 @@ type SLM interface {
 // NewMockSLM returns a deterministic lightweight SLM suitable for tests and local use.
 func NewMockSLM() SLM { return &mockSLM{dim: 64, threshold: 0.75} }
 
+const minOllamaEmbeddingsVersion = "0.1.25"
+
 // NewDefaultSLM returns the default SLM backend. By default it will try to use
 // Ollama (local HTTP API). If Ollama is unreachable or embedding calls fail,
 // it gracefully falls back to the deterministic mock SLM so tests and local
@@ -38,22 +40,30 @@ func NewDefaultSLM() SLM {
 	case "mock":
 		return NewMockSLM()
 	case "ollama":
-		url := os.Getenv("SLM_OLLAMA_URL")
-		if url == "" {
-			url = "http://localhost:11434"
+		require := os.Getenv("SLM_REQUIRE_OLLAMA") == "1"
+		baseURL := strings.TrimSpace(os.Getenv("SLM_OLLAMA_URL"))
+		if baseURL == "" {
+			baseURL = "http://localhost:11434"
 		}
 		model := os.Getenv("SLM_OLLAMA_MODEL")
 		if model == "" {
 			model = "nomic-embed-text"
 		}
-		s := NewOllamaSLM(url, model)
-		require := os.Getenv("SLM_REQUIRE_OLLAMA") == "1"
+		if err := ensureOllamaModel(baseURL, model); err != nil {
+			if require {
+				panic(fmt.Sprintf("ollama model %s required but unavailable: %v", model, err))
+			}
+			log.Printf("slm: ollama model check failed (%v), falling back to mock", err)
+			return NewMockSLM()
+		}
+		s := NewOllamaSLM(baseURL, model)
 		// quick sanity embed to ensure Ollama is reachable; if not, handle per requirement flag
 		if _, err := s.Embed("health-check"); err != nil {
+			msg := fmt.Sprintf("ollama embed failed (SLM_OLLAMA_URL=%s): %v", baseURL, err)
 			if require {
-				panic(fmt.Sprintf("ollama backend required but embed failed: %v", err))
+				panic(fmt.Sprintf("ollama backend required but embed failed: %s. Ensure 'ollama serve' is running and reachable at %s", err, baseURL))
 			}
-			log.Printf("slm: ollama embed failed (%v), falling back to mock", err)
+			log.Printf("slm: %s; falling back to mock", msg)
 			return NewMockSLM()
 		}
 		return s
@@ -224,3 +234,181 @@ func (o *ollamaSLM) Decide(prompt string, candidateIDs []int64, candidateEmbeddi
 
 // BackendName identifies the ollama backend.
 func (o *ollamaSLM) BackendName() string { return "ollama" }
+
+type ollamaTagsResponse struct {
+	Models []struct {
+		Name  string `json:"name"`
+		Model string `json:"model"`
+	} `json:"models"`
+}
+
+func ensureOllamaModel(baseURL, model string) error {
+	trimmed := strings.TrimRight(baseURL, "/")
+	if trimmed == "" {
+		trimmed = baseURL
+	}
+	if model == "" {
+		return errors.New("missing model name")
+	}
+	if err := ensureOllamaSupportsEmbeddings(trimmed); err != nil {
+		return err
+	}
+	exists, err := ollamaModelExists(trimmed, model)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return pullOllamaModel(trimmed, model)
+}
+
+func ollamaModelExists(baseURL, model string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("ollama tags status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tags ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return false, err
+	}
+	for _, m := range tags.Models {
+		if modelMatches(m.Name, model) || modelMatches(m.Model, model) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func pullOllamaModel(baseURL, model string) error {
+	body, _ := json.Marshal(map[string]string{"name": model})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/pull", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ollama pull %s failed: status %d %s", model, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+func modelMatches(have, want string) bool {
+	if have == "" || want == "" {
+		return false
+	}
+	if have == want {
+		return true
+	}
+	if strings.HasPrefix(have, want+":") {
+		return true
+	}
+	return false
+}
+
+func ensureOllamaSupportsEmbeddings(baseURL string) error {
+	version, err := fetchOllamaVersion(baseURL)
+	if err != nil {
+		return fmt.Errorf("ollama version check failed: %w", err)
+	}
+	if compareSemver(version, minOllamaEmbeddingsVersion) < 0 {
+		return fmt.Errorf("ollama version %s does not support embeddings; upgrade to %s or newer", version, minOllamaEmbeddingsVersion)
+	}
+	return nil
+}
+
+func fetchOllamaVersion(baseURL string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/version", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Version == "" {
+		return "", errors.New("empty version field")
+	}
+	return normalizeVersion(out.Version), nil
+}
+
+func normalizeVersion(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "v")
+	if idx := strings.IndexAny(trimmed, " -"); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+	return trimmed
+}
+
+func compareSemver(a, b string) int {
+	split := func(v string) []int {
+		v = normalizeVersion(v)
+		parts := strings.Split(v, ".")
+		res := make([]int, len(parts))
+		for i, p := range parts {
+			if p == "" {
+				continue
+			}
+			fmt.Sscanf(p, "%d", &res[i])
+		}
+		return res
+	}
+	av := split(a)
+	bv := split(b)
+	maxLen := len(av)
+	if len(bv) > maxLen {
+		maxLen = len(bv)
+	}
+	for len(av) < maxLen {
+		av = append(av, 0)
+	}
+	for len(bv) < maxLen {
+		bv = append(bv, 0)
+	}
+	for i := 0; i < maxLen; i++ {
+		if av[i] < bv[i] {
+			return -1
+		}
+		if av[i] > bv[i] {
+			return 1
+		}
+	}
+	return 0
+}

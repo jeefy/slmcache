@@ -23,6 +23,7 @@ func setupServer(t *testing.T) (*httptest.Server, func()) {
 	srv := server.New(st)
 	ts := httptest.NewServer(srv.Router())
 	return ts, func() {
+		srv.Close()
 		ts.Close()
 	}
 }
@@ -70,8 +71,8 @@ func TestE2E_cacheHitAndMiss(t *testing.T) {
 	ts, cleanup := setupServer(t)
 	defer cleanup()
 
-	// create a cached entry
-	created := postEntry(t, ts.URL, &models.Entry{Prompt: "How to bake a cake", Response: "Use flour, eggs, and bake"})
+	// create a cached entry with metadata
+	created := postEntry(t, ts.URL, &models.Entry{Prompt: "How to bake a cake", Response: "Use flour, eggs, and bake", Metadata: map[string]interface{}{"source": "faq"}})
 
 	// simulated SLM: query for a similar prompt -> should return candidate(s)
 	candidates := search(t, ts.URL, "bake cake")
@@ -83,6 +84,23 @@ func TestE2E_cacheHitAndMiss(t *testing.T) {
 	chosen := candidates[0]
 	if chosen.ID != created.ID {
 		t.Fatalf("expected chosen id %d to equal created id %d", chosen.ID, created.ID)
+	}
+
+	// metadata query should surface the entry
+	metaResp, err := http.Get(ts.URL + "/entries?metadata.source=faq")
+	if err != nil {
+		t.Fatalf("metadata query: %v", err)
+	}
+	if metaResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 metadata query got %d", metaResp.StatusCode)
+	}
+	var metaEntries []*models.Entry
+	if err := json.NewDecoder(metaResp.Body).Decode(&metaEntries); err != nil {
+		t.Fatalf("decode metadata entries: %v", err)
+	}
+	metaResp.Body.Close()
+	if len(metaEntries) != 1 || metaEntries[0].ID != created.ID {
+		t.Fatalf("expected metadata query to return created entry")
 	}
 
 	// cache miss: query something unrelated

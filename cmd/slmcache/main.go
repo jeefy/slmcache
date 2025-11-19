@@ -18,6 +18,7 @@ func main() {
 	}
 
 	srv := server.New(st)
+	defer srv.Close()
 
 	addr := ":8080"
 	log.Printf("starting slmcache on %s", addr)
